@@ -1,0 +1,100 @@
+import pyupbit
+import time
+import numpy as np
+
+access = "9trdAcA24NDtaBdbjO4LACmE36SY1TQwdlIkmRvB"
+secret = "7mkO98HE3Dc97Jemedn4YjKhIi5sJTsDcO8HtxWy"
+upbit = pyupbit.Upbit(access, secret)
+
+def calculate_moving_average(ticker, interval, count):
+    df = pyupbit.get_ohlcv(ticker, interval=interval, count=count)
+    if df is None:
+        print(f"Failed to get ohlcv data for {ticker}")
+        return None
+    return df['close'].rolling(window=count).mean().iloc[-1]
+
+def calculate_bollinger_bands(df, window):
+    rolling_mean = df['close'].rolling(window=window).mean()
+    rolling_std = df['close'].rolling(window=window).std()
+    upper_band = rolling_mean + (rolling_std * 2)
+    lower_band = rolling_mean - (rolling_std * 2)
+    return upper_band, lower_band
+
+def calculate_rsi(df, window):
+    delta = df['close'].diff()
+    up, down = delta.copy(), delta.copy()
+    up[up < 0] = 0
+    down[down > 0] = 0
+    avg_gain = up.rolling(window=window).mean()
+    avg_loss = abs(down.rolling(window=window).mean())
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def get_top_10_returns(interval, count):
+    coins = pyupbit.get_tickers("KRW")
+    returns = []
+
+    for coin in coins:
+        try:
+            df = pyupbit.get_ohlcv(coin, interval=interval, count=count)
+            if df is not None and len(df) == count:
+                start_price = df.iloc[0]['close']
+                end_price = df.iloc[-1]['close']
+                returns.append((coin, (end_price - start_price) / start_price * 100))
+        except Exception as e:
+            print(f"Error occurred while getting ohlcv data for {coin}: {e}")
+
+    sorted_returns = sorted(returns, key=lambda x: x[1], reverse=True)
+    top_10_returns = sorted_returns[:10]
+
+    return top_10_returns
+
+def execute_strategy(ticker, interval, hold):
+    df = pyupbit.get_ohlcv(ticker, interval=interval, count=21)  # 필요한 기간만큼 데이터를 가져옵니다.
+    if df is None:
+        print(f"Failed to get ohlcv data for {ticker}")
+        return hold
+
+    ma5 = calculate_moving_average(ticker, interval, 5)
+    upper_band, lower_band = calculate_bollinger_bands(df, 20)
+    rsi = calculate_rsi(df, 14)
+
+    if ma5 is None or np.isnan(upper_band.iloc[-1]) or np.isnan(lower_band.iloc[-1]) or np.isnan(rsi.iloc[-1]):
+        return hold
+
+    current_price = df['close'].iloc[-1]
+
+    # 매수 조건: 현재 가격이 MA5보다 높고, 볼린저 밴드의 하단을 터치하거나 통과했으며, RSI가 30 이하일 때
+    if ma5 < current_price and current_price <= lower_band.iloc[-1] and rsi.iloc[-1] <= 30 and not hold:
+        krw_balance = upbit.get_balance("KRW")
+        if krw_balance is not None and krw_balance > 0:
+            response = upbit.buy_market_order(ticker, krw_balance * 0.3)
+            if response is not None:
+                hold = True
+                print(f"Bought {ticker}")
+            else:
+                print(f"Failed to buy {ticker}")
+
+    # 매도 조건: 현재 가격이 MA5보다 낮고, 볼린저 밴드의 상단을 터치하거나 통과했으며, RSI가 70 이상일 때
+    if ma5 > current_price and current_price >= upper_band.iloc[-1] and rsi.iloc[-1] >= 70 and hold:
+        coin_balance = upbit.get_balance(ticker)
+        if coin_balance is not None and coin_balance > 0:
+            response = upbit.sell_market_order(ticker, coin_balance)
+            if response is not None:
+                hold = False
+                print(f"Sold {ticker}")
+            else:
+                print(f"Failed to sell {ticker}")
+
+    return hold
+
+interval = "minute5"
+top_10_coins = get_top_10_returns(interval, 24*60//5)
+holds = {coin: False for coin, _ in top_10_coins}
+
+while True:
+    for coin, _ in top_10_coins:
+        holds[coin] = execute_strategy(coin, interval, holds[coin])
+
+    time.sleep(60)
